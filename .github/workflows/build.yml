@@ -78,6 +78,22 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install ninja meson pkg-config glib pixman
+          # ⚠️ `distlib`, AND IT IS NOT AN OPTIONAL EXTRA. QEMU's `configure`
+          # builds a non-isolated virtual environment with its own `mkvenv`
+          # script, which needs `distlib` to populate it. Homebrew's Python 3.14
+          # does not carry it, and the failure is a configure-time
+          #
+          #     *** Ouch! ***
+          #     found no usable distlib, please install it
+          #
+          # twenty seconds in, which reads like a QEMU problem and is a Python
+          # packaging one.
+          #
+          # `--break-system-packages` because Homebrew's Python is
+          # externally-managed (PEP 668) and refuses otherwise. On a throwaway
+          # runner that is the right trade; on a developer's machine it is not,
+          # which is why it is spelled out rather than hidden in a helper.
+          python3 -m pip install --break-system-packages distlib
           # ⚠️ NOT INSTALLING `qemu` ITSELF. Homebrew's formula would pull a
           # working emulator and every check below would pass without this
           # workflow having built anything — the shape of false green this
@@ -110,7 +126,37 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-zlib
 
+      # ⚠️ WINDOWS EXTRACTS UNDER MSYS2, AND THE REASON IS SYMLINKS.
+      #
+      # QEMU's source tarball carries `roms/u-boot`, which is full of them.
+      # Git Bash's `tar` cannot create a symlink without the privilege or
+      # developer mode, and produces hundreds of
+      #
+      #     tar: qemu-9.2.4/roms/u-boot/include/ctype.h:
+      #          Cannot create symlink to 'linux/ctype.h'
+      #
+      # before failing. MSYS2's `tar` copies instead, which is what its symlink
+      # emulation does by default.
+      #
+      # `roms/` is excluded regardless: it holds firmware SOURCE for machines
+      # this build does not produce, and `x86_64-softmmu` takes its firmware
+      # from the prebuilt blobs in `pc-bios/`. Excluding it removes the problem
+      # rather than working around it, and it removes about a third of the
+      # extraction.
+      - name: Fetch QEMU ${{ env.QEMU_VERSION }} (Windows)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "$(cygpath "$GITHUB_WORKSPACE")"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
+            -o qemu.tar.xz \
+            "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz"
+          tar xf qemu.tar.xz --exclude="qemu-${QEMU_VERSION}/roms/*"
+          test -d "qemu-${QEMU_VERSION}/pc-bios" || { echo "the firmware blobs the build needs are missing"; exit 1; }
+
       - name: Fetch QEMU ${{ env.QEMU_VERSION }}
+        if: runner.os != 'Windows'
         run: |
           set -euo pipefail
           # ⚠️ `--retry-all-errors`, NOT JUST `--retry`. curl's plain `--retry`
