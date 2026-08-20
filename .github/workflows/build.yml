@@ -315,6 +315,7 @@ jobs:
           # carrying a second libc into a process is the two-glibcs shape this
           # index's own contract text names as a SIGSEGV source.
           if [ "$RUNNER_OS" = "Linux" ]; then
+            set +e   # same reason as the macOS branch below
             ldd qemu-system-x86_64 \
               | awk '/=> \// {print $3}' \
               | grep -vE '/(libc|libm|libdl|librt|libpthread|libresolv|ld-linux[^ ]*)\.so' \
@@ -326,7 +327,19 @@ jobs:
             sudo apt-get install -y -qq patchelf
             patchelf --set-rpath '$ORIGIN/../lib' ../out/bin/qemu-system-x86_64
             for so in ../out/lib/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true; done
+            echo "bundled: $(ls -1 ../out/lib 2>/dev/null | wc -l) libraries"
+            set -e
           elif [ "$RUNNER_OS" = "macOS" ]; then
+            # ⚠️ `set +e` FOR THIS BLOCK, AND THE REASON IS A SILENT KILL.
+            #
+            # The first version ran under `set -euo pipefail` and died with exit
+            # 1 and NO output, right after ninja reported 1564/1564. Every
+            # command here is in a pipeline ending in `grep`, and a `grep` that
+            # matches nothing returns 1 — which `pipefail` promotes to the
+            # pipeline's status and `-e` turns into an exit. A bundling step
+            # that finds nothing to bundle is not an error; a payload that still
+            # points outside itself is, and the assertion below is what says so.
+            set +e
             # Mach-O records each dependency by the install name the LIBRARY
             # carries, so copying is not enough: every reference has to be
             # rewritten, and so does each bundled library's own id.
@@ -350,6 +363,8 @@ jobs:
             # binary is killed by the kernel rather than merely warned about.
             codesign --force -s - ../out/bin/qemu-system-x86_64 2>/dev/null || true
             for dy in ../out/lib/*.dylib; do codesign --force -s - "$dy" 2>/dev/null || true; done
+            echo "bundled: $(ls -1 ../out/lib 2>/dev/null | wc -l) libraries"
+            set -e
           fi
           rmdir ../out/lib 2>/dev/null || true
 
