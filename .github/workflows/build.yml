@@ -303,17 +303,52 @@ jobs:
           #
           # The Unix legs name the target without a suffix and this one with,
           # because meson names the target after the file it produces.
-          # ⚠️ AND THE INSTALL NEEDS MORE THAN THE EMULATOR. With only that
-          # target built, `meson install --no-rebuild` stops at
+          ninja -j"$(nproc)" qemu-system-x86_64.exe
+
+          # ⚠️ ASSEMBLED BY HAND RATHER THAN BY `meson install`, AND THE REASON
+          # GENERALISES BEYOND THIS HOST.
+          #
+          # `meson install --no-rebuild` stops at the first GENERATED file the
+          # install list names but the emulator target did not produce:
           #
           #     ERROR: File 'trace/trace-events-all' could not be found
           #
-          # which is a GENERATED data file the install step copies. Naming it
-          # here rather than dropping `--no-rebuild` is deliberate: without the
-          # flag, meson rebuilds everything, which is how the unit test that
-          # does not link on MinGW comes back.
-          ninja -j"$(nproc)" qemu-system-x86_64.exe trace/trace-events-all
-          meson install --no-rebuild
+          # Naming that file makes it stop at the next one. Dropping
+          # `--no-rebuild` instead makes meson rebuild everything, which brings
+          # back the unit test that does not link on MinGW. Neither converges.
+          #
+          # ⭐ AND THE INSTALL TARGET IS NOT WHAT A PAYLOAD WANTS ANYWAY.
+          # Measured on linux-x64: stripping took the emulator from 78.7 MB to
+          # 27.0 MB while the whole installed prefix went only 392 MB to 343 MB,
+          # so roughly 316 MB of `meson install`'s output is not the emulator.
+          # A payload has to SELECT, and doing that here makes the contents
+          # explicit rather than "whatever the install target happened to copy".
+          #
+          # What an x86_64 emulator needs: itself, and the firmware blobs in
+          # `pc-bios` that its machine types load. Those are prebuilt files in
+          # the tarball, not build outputs.
+          mkdir -p ../out/bin ../out/share/qemu
+          cp qemu-system-x86_64.exe ../out/bin/
+          cp -r "../qemu-${QEMU_VERSION}/pc-bios/." ../out/share/qemu/
+          # ⚠️ NOTHING IS DELETED HERE, AND RESISTING THAT IS THE POINT. The
+          # tempting next step is to prune `keymaps` and the firmware
+          # descriptors — but which of them a machine type loads at run time is
+          # a question for the descriptor, and answering it by deleting
+          # directories until something breaks is how a payload ends up missing
+          # a blob on somebody else's machine. The whole `pc-bios` tree is
+          # copied and its size is reported below.
+
+          # ⚠️ THE DLL CLOSURE IS THE WINDOWS PACKAGING QUESTION, AND IT IS
+          # ANSWERED BY MEASUREMENT RATHER THAN BY A LIST. The other four hosts
+          # resolve their dependencies through an rpath inside the payload; a PE
+          # has no such thing, so every MinGW runtime library the emulator loads
+          # has to sit beside it. `ldd` under MSYS2 reports the closure; only
+          # the ones from the UCRT64 prefix are ours to ship.
+          ldd qemu-system-x86_64.exe \
+            | awk '/ucrt64/ {print $3}' \
+            | while read -r dll; do cp -n "$dll" ../out/bin/ 2>/dev/null || true; done
+          echo "── the MinGW runtime the emulator needs ──"
+          ls -1 ../out/bin/*.dll 2>/dev/null | wc -l
 
       # ── The check that the artifact is an emulator, not a file ────────────
       #
