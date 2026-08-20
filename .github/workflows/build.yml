@@ -29,6 +29,10 @@ name: five hosts
 on:
   push:
     branches: [main]
+    # ⚠️ A TAG BUILDS THE SAME FIVE LEGS AND PUBLISHES THEM. The matrix is not
+    # duplicated into a separate release workflow: a release built by different
+    # steps from the ones that were tested is a release nobody tested.
+    tags: ['[0-9]+.[0-9]+.[0-9]+*']
   pull_request:
   workflow_dispatch:
 
@@ -44,6 +48,8 @@ jobs:
     name: qemu-system-x86_64 on ${{ matrix.label }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
+    permissions:
+      contents: write   # the tag path attaches archives to the release
     strategy:
       fail-fast: false
       matrix:
@@ -521,8 +527,52 @@ jobs:
           du -sh out/* 2>/dev/null | sort -rh | head -10
           du -sh out/share/* 2>/dev/null | sort -rh | head -10
 
+      # ── The publishable archive ────────────────────────────────────────
+      #
+      # ⚠️ NAMED FOR THE INDEX, NOT FOR THIS REPOSITORY. `xim`'s descriptor
+      # builds the URL from `${version}` and a platform/arch pair, so the file
+      # name has to be derivable from those alone — `qemu-x86-<ver>-<host>.<ext>`
+      # with the same `linux`/`darwin`/`win32` and `x64`/`arm64` spellings
+      # `qemu-riscv` uses. A name only this workflow understands would force the
+      # descriptor to special-case it.
+      #
+      # The sidecar carries the same hash the descriptor will quote, computed
+      # here from the archive that is actually uploaded rather than recomputed
+      # later from a download.
+      - name: Pack the archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${GITHUB_REF_NAME}"
+          case "$V" in refs/*|main) V="${QEMU_VERSION}" ;; esac
+          NAME="qemu-x86-${V}-${{ matrix.label }}"
+          mkdir -p dist
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            ( cd out && 7z a -tzip "../dist/${NAME}.zip" . > /dev/null )
+            F="dist/${NAME}.zip"
+          else
+            tar czf "dist/${NAME}.tar.gz" -C out .
+            F="dist/${NAME}.tar.gz"
+          fi
+          # ⚠️ `shasum -a 256` rather than `sha256sum`: macOS has the former and
+          # not the latter, and a fallback chain here is one line against a leg
+          # that would otherwise fail after a 40-minute build.
+          if command -v sha256sum > /dev/null; then sha256sum "$F" > "$F.sha256";
+          else shasum -a 256 "$F" > "$F.sha256"; fi
+          ls -l dist/
+          cat "$F.sha256"
+
       - uses: actions/upload-artifact@v4
         with:
-          name: qemu-system-x86_64-${{ matrix.label }}
-          path: out
+          name: qemu-x86-${{ matrix.label }}
+          path: dist
           retention-days: 14
+
+      # ⚠️ ONLY ON A TAG, AND ONLY AFTER THE CHECKS ABOVE. A leg that built but
+      # did not produce a runnable emulator must not reach a release.
+      - name: Publish to the release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          fail_on_unmatched_files: true
