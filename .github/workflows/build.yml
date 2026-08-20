@@ -303,7 +303,16 @@ jobs:
           #
           # The Unix legs name the target without a suffix and this one with,
           # because meson names the target after the file it produces.
-          ninja -j"$(nproc)" qemu-system-x86_64.exe
+          # ⚠️ AND THE INSTALL NEEDS MORE THAN THE EMULATOR. With only that
+          # target built, `meson install --no-rebuild` stops at
+          #
+          #     ERROR: File 'trace/trace-events-all' could not be found
+          #
+          # which is a GENERATED data file the install step copies. Naming it
+          # here rather than dropping `--no-rebuild` is deliberate: without the
+          # flag, meson rebuilds everything, which is how the unit test that
+          # does not link on MinGW comes back.
+          ninja -j"$(nproc)" qemu-system-x86_64.exe trace/trace-events-all
           meson install --no-rebuild
 
       # ── The check that the artifact is an emulator, not a file ────────────
