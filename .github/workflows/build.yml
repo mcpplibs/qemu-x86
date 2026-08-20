@@ -136,6 +136,8 @@ jobs:
             mingw-w64-ucrt-x86_64-meson
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-zlib
+            mingw-w64-ucrt-x86_64-python-distlib
+            mingw-w64-ucrt-x86_64-python-pip
 
       # ⚠️ WINDOWS EXTRACTS UNDER MSYS2 WITH SYMLINK EMULATION FORCED ON, AND IT
       # TOOK TWO ROUNDS TO GET THAT RIGHT.
@@ -199,11 +201,18 @@ jobs:
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
-          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-python-distlib \
-            || python3 -m pip install --break-system-packages distlib \
-            || python3 -m pip install distlib
-          python3 -m pip install --break-system-packages pycotap \
-            || python3 -m pip install pycotap
+          set -euo pipefail
+          # ⚠️ `pip` IS A SEPARATE PACKAGE HERE, AND ASSUMING IT WAS PRESENT COST
+          # A ROUND. MSYS2's Python ships without it:
+          #
+          #     python3.exe: No module named pip.__main__;
+          #                  'pip' is a package and cannot be directly executed
+          #
+          # so it is now in the install list above rather than reached for here.
+          # `distlib` is there too, because pacman's copy is what an MSYS2 user
+          # would have and installing it declaratively is one less step that can
+          # fail halfway.
+          python3 -m pip install --no-input pycotap
           python3 -c "import distlib, pycotap; print('distlib', distlib.__version__, '/ pycotap ok')"
 
       - name: Fetch QEMU ${{ env.QEMU_VERSION }} (Windows)
