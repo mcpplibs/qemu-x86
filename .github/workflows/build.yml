@@ -420,10 +420,22 @@ jobs:
               .bss       : { *(.bss*) __bss_end = .; }
           }
           LD
-          # The host's own toolchain assembles it; this step is about the
-          # emulator, not about cross-compilation.
-          if [ "$RUNNER_OS" = "macOS" ] || [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then
-            echo "::notice::no host assembler emits x86 ELF here; the emulator's --version is the check on this leg"
+          # ⚠️ THE GATE IS "CAN THIS HOST LINK AN x86 ELF", AND MY FIRST VERSION
+          # ASKED THE WRONG QUESTION.
+          #
+          # It checked for a 32-bit COMPILER and let the link run. On Windows
+          # that passes — MinGW's `cc -m32` happily produces an object — and
+          # then the link fails, because the linker beside it emits PE and
+          # nothing else:
+          #
+          #     ld.exe: unrecognised emulation mode: elf_i386
+          #     Supported emulations: i386pep i386pe
+          #
+          # An arm64 or macOS runner fails earlier for a different reason. One
+          # check covers all of them: ask the LINKER whether it knows the
+          # emulation, which is the step that actually has to work.
+          if ! ld -V 2>/dev/null | grep -q "elf_i386"; then
+            echo "::notice::this host's linker emits no x86 ELF (supported: $(ld -V 2>/dev/null | tr '\n' ' ' | head -c 120)); the emulator's --version is the whole of the check on this leg"
             exit 0
           fi
           cc -m32 -c -o probe.o probe.S -nostdlib 2>/dev/null \
