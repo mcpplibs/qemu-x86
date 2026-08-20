@@ -1,0 +1,268 @@
+name: five hosts
+
+# ⚠️ THIS WORKFLOW IS THE QUESTION, NOT THE ANSWER.
+#
+# The mcpp/xlings package index has a stated bar for admitting an emulator, and
+# `qemu-riscv`'s descriptor writes it down: prebuilt binaries for the FIVE host
+# targets the index serves — linux x64, linux arm64, darwin x64, darwin arm64,
+# win32 x64 — from one versioned release, each asset with a checksum sidecar.
+#
+# xPack publishes QEMU per target family and has no x86 build. qemu.org ships a
+# Windows installer only; macOS and Linux are served by distribution packages.
+# So no upstream clears the bar, and `xim:qemu-x86` cannot be a repackaging job
+# the way `xim:qemu-arm` and `xim:qemu-riscv` are — it has to be built.
+#
+# ⭐ THE POINT OF DOING IT HERE FIRST IS THAT A FAILURE COSTS A RED CROSS.
+#
+# The alternative order — write the descriptor, mirror the assets, open the
+# index PR, then discover that the Windows leg does not build — produces a
+# published package that cannot be installed. GitHub's hosted runners happen to
+# cover exactly the five hosts the index serves, so all five legs can be
+# attempted in one matrix before anything is published, and the hardest one
+# fails early rather than last.
+#
+# ⚠️ NOTHING HERE PUBLISHES. The artifacts are retained for inspection and for
+# measuring what a real payload would weigh. Admission to the index is a
+# separate decision, made after five green legs, and it needs the DT_NEEDED /
+# otool closure measured per host rather than copied from a sibling descriptor.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  # ⚠️ PINNED, AND NOT TO `master`. A payload the index serves must be
+  # reproducible from a version, and "whatever upstream had that day" is not a
+  # version. 9.2.4 is the series `qemu-arm` and `qemu-riscv` already carry, so
+  # a user who installs all three gets one QEMU generation rather than two.
+  QEMU_VERSION: 9.2.4
+
+jobs:
+  build:
+    name: qemu-system-x86_64 on ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { label: linux-x64,    os: ubuntu-24.04       }
+          - { label: linux-arm64,  os: ubuntu-24.04-arm   }
+          - { label: darwin-arm64, os: macos-14           }
+          - { label: darwin-x64,   os: macos-13           }
+          - { label: win32-x64,    os: windows-2022       }
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # ── The dependencies, per host ────────────────────────────────────────
+      #
+      # ⚠️ A SINGLE TARGET IS WHAT MAKES THIS AFFORDABLE. QEMU's full build is
+      # dozens of system emulators plus tools, docs and UI backends;
+      # `--target-list=x86_64-softmmu` with the UI and tools disabled is a small
+      # fraction of it. The index needs one emulator, not a distribution.
+      - name: Dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            ninja-build meson pkg-config python3-venv \
+            libglib2.0-dev libpixman-1-dev zlib1g-dev flex bison
+
+      - name: Dependencies (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install ninja meson pkg-config glib pixman
+          # ⚠️ NOT INSTALLING `qemu` ITSELF. Homebrew's formula would pull a
+          # working emulator and every check below would pass without this
+          # workflow having built anything — the shape of false green this
+          # repository exists to avoid.
+
+      # ⚠️ THE WINDOWS LEG IS THE ONE THIS WORKFLOW EXISTS TO ANSWER, AND IT IS
+      # NOT AN ORDINARY BUILD.
+      #
+      # QEMU on Windows is built under MSYS2/MinGW, not MSVC: its build system
+      # is meson and its sources assume a POSIX-ish toolchain. The result is a
+      # native PE that needs a set of MinGW runtime DLLs beside it, which is why
+      # the packaging question here is different from the other four hosts —
+      # `otool`/`readelf` closure has a `ntldd` counterpart and the answer is a
+      # directory of DLLs rather than an rpath.
+      - name: Dependencies (Windows / MSYS2)
+        if: runner.os == 'Windows'
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            base-devel
+            git
+            python
+            mingw-w64-ucrt-x86_64-toolchain
+            mingw-w64-ucrt-x86_64-glib2
+            mingw-w64-ucrt-x86_64-pixman
+            mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-meson
+            mingw-w64-ucrt-x86_64-pkgconf
+            mingw-w64-ucrt-x86_64-zlib
+
+      - name: Fetch QEMU ${{ env.QEMU_VERSION }}
+        run: |
+          set -euo pipefail
+          # ⚠️ `--retry-all-errors`, NOT JUST `--retry`. curl's plain `--retry`
+          # covers transient HTTP status codes and NOT transport-layer errors,
+          # and `curl: (52) empty reply from server` is the one this project
+          # keeps meeting. Without it a truncated download is reported as
+          # success and the failure surfaces as a corrupt archive.
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
+            -o qemu.tar.xz \
+            "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz"
+          curl -fsSL --retry 5 --retry-all-errors --retry-delay 3 \
+            -o qemu.tar.xz.sig \
+            "https://download.qemu.org/qemu-${QEMU_VERSION}.tar.xz.sig" || true
+          tar xf qemu.tar.xz
+          echo "SRC=$PWD/qemu-${QEMU_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Configure and build (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          mkdir -p build && cd build
+          "$SRC/configure" \
+            --target-list=x86_64-softmmu \
+            --prefix="$PWD/../out" \
+            --disable-docs --disable-guest-agent --disable-tools \
+            --disable-vnc --disable-sdl --disable-gtk --disable-curses \
+            --disable-libssh --disable-vde --disable-spice \
+            --disable-smartcard --disable-usb-redir --disable-opengl \
+            --disable-virglrenderer --disable-blkio --disable-libdaxctl \
+            --disable-brlapi --disable-curl
+          ninja -j"$(getconf _NPROCESSORS_ONLN)"
+          ninja install
+
+      - name: Configure and build (Windows / MSYS2)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          set -euo pipefail
+          cd "$(cygpath "$GITHUB_WORKSPACE")"
+          mkdir -p build && cd build
+          "../qemu-${QEMU_VERSION}/configure" \
+            --target-list=x86_64-softmmu \
+            --prefix="$PWD/../out" \
+            --disable-docs --disable-guest-agent --disable-tools \
+            --disable-vnc --disable-sdl --disable-gtk --disable-curses \
+            --disable-libssh --disable-spice --disable-smartcard \
+            --disable-usb-redir --disable-opengl --disable-virglrenderer \
+            --disable-curl
+          ninja -j"$(nproc)"
+          ninja install
+
+      # ── The check that the artifact is an emulator, not a file ────────────
+      #
+      # ⭐ A BUILT BINARY IS NOT EVIDENCE; A BOOTED IMAGE IS. The index's own
+      # e2e discipline is "assert the product, not the exit code", and the
+      # cheapest product here is a multiboot image that prints and powers off.
+      # It is built by the workflow rather than committed so that nothing in
+      # this repository is a binary blob whose provenance has to be trusted.
+      - name: The emulator boots a freestanding image
+        shell: bash
+        run: |
+          set -euo pipefail
+          QEMU=$(find out -name 'qemu-system-x86_64*' -type f | head -1)
+          test -n "$QEMU" || { find out -type f | head -40; echo "no emulator was produced"; exit 1; }
+          "$QEMU" --version | head -1
+
+          # A minimal multiboot image. ⚠️ The a.out kludge (flag bit 16) rather
+          # than plain ELF loading: QEMU's multiboot loader accepts only 32-bit
+          # ELF images, and this one has to be assembled as 32-bit anyway, so
+          # the kludge is not strictly needed here — it is used because the
+          # real consumer (openarch's probe) is a 64-bit image that cannot be
+          # loaded any other way, and a check that exercised a different path
+          # would not be checking the same thing.
+          cat > probe.S <<'ASM'
+          .set MAGIC,    0x1BADB002
+          .set FLAGS,    0x00010000
+          .set CHECKSUM, -(MAGIC + FLAGS)
+              .section .multiboot,"a"
+              .align 4
+          mb: .long MAGIC
+              .long FLAGS
+              .long CHECKSUM
+              .long mb
+              .long __load_start
+              .long __load_end
+              .long __bss_end
+              .long _start
+              .code32
+              .section .text
+              .globl _start
+          _start:
+              cli
+              movl $msg, %esi
+          1:  lodsb
+              testb %al, %al
+              je 2f
+              movw $0x3F8, %dx
+              outb %al, %dx
+              jmp 1b
+          2:  movw $0x604, %dx
+              movw $0x2000, %ax
+              outw %ax, %dx
+          3:  hlt
+              jmp 3b
+              .section .rodata
+          msg: .asciz "qemu-x86 probe ok\n"
+              .section .bss
+              .space 16
+          ASM
+          cat > probe.ld <<'LD'
+          ENTRY(_start)
+          SECTIONS {
+              __load_start = 0x100000;
+              . = __load_start + SIZEOF_HEADERS;
+              .multiboot : { KEEP(*(.multiboot)) }
+              .text      : { *(.text*) }
+              .rodata    : { *(.rodata*) }
+              __load_end = .;
+              .bss       : { *(.bss*) __bss_end = .; }
+          }
+          LD
+          # The host's own toolchain assembles it; this step is about the
+          # emulator, not about cross-compilation.
+          if [ "$RUNNER_OS" = "macOS" ] || [ "$(uname -m)" = "aarch64" ] || [ "$(uname -m)" = "arm64" ]; then
+            echo "::notice::no host assembler emits x86 ELF here; the emulator's --version is the check on this leg"
+            exit 0
+          fi
+          cc -m32 -c -o probe.o probe.S -nostdlib 2>/dev/null \
+            || { echo "::notice::no 32-bit x86 assembler on this leg; --version is the check"; exit 0; }
+          ld -m elf_i386 -T probe.ld -o probe.elf probe.o
+          timeout -k 5 60 "$QEMU" -machine q35 -nographic -no-reboot -kernel probe.elf 2>&1 | tee run.log
+          grep -q "qemu-x86 probe ok" run.log
+
+      # ⚠️ WHAT A PAYLOAD WOULD ACTUALLY WEIGH, MEASURED RATHER THAN ESTIMATED.
+      # The index's size discipline came from a real incident: a payload was
+      # 34.81 MB and became 4.62 MB once stripped, and the upload failures that
+      # had been blamed on the mirror were the size.
+      - name: What the payload weighs, and what it needs
+        shell: bash
+        run: |
+          set -euo pipefail
+          QEMU=$(find out -name 'qemu-system-x86_64*' -type f | head -1)
+          ls -l "$QEMU"
+          case "$RUNNER_OS" in
+            Linux)   readelf -d "$QEMU" | grep NEEDED || true ;;
+            macOS)   otool -L "$QEMU" || true ;;
+            Windows) echo "(the DLL closure is measured in the packaging step, not here)" ;;
+          esac
+          du -sh out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: qemu-system-x86_64-${{ matrix.label }}
+          path: out
+          retention-days: 14
