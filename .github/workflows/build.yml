@@ -261,8 +261,31 @@ jobs:
             --disable-smartcard --disable-usb-redir --disable-opengl \
             --disable-virglrenderer --disable-blkio --disable-libdaxctl \
             --disable-brlapi --disable-curl
-          ninja -j"$(getconf _NPROCESSORS_ONLN)"
-          ninja install
+          ninja -j"$(getconf _NPROCESSORS_ONLN)" qemu-system-x86_64
+
+          # ⚠️ ASSEMBLED EXPLICITLY, THE SAME WAY THE WINDOWS LEG DOES, AND THE
+          # NUMBERS ARE WHY.
+          #
+          # `ninja install` was used here first. Measured against the explicit
+          # assembly on the same release:
+          #
+          #     meson install (linux-x64)   392 MB → 343 MB stripped
+          #     explicit      (win32-x64)   110 MB →  58 MB stripped
+          #
+          # So the install target ships roughly 285 MB that an emulator payload
+          # has no use for. The index's asset budget is a per-connection upload
+          # rate measured at 0.012 MB/s into the CN mirror, with no multipart
+          # and no resume — a payload has to SELECT, and selecting here makes
+          # the contents explicit rather than "whatever the install target
+          # copied".
+          #
+          # ⚠️ NOTHING IS PRUNED FROM `pc-bios`. Which blobs a machine type
+          # loads at run time is a question for the descriptor, and answering it
+          # by deleting files until something breaks is how a payload ends up
+          # missing one on somebody else's machine.
+          mkdir -p ../out/bin ../out/share/qemu
+          cp qemu-system-x86_64 ../out/bin/
+          cp -r "$SRC/pc-bios/." ../out/share/qemu/
 
       - name: Configure and build (Windows / MSYS2)
         if: runner.os == 'Windows'
