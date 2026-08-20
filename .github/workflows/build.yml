@@ -51,7 +51,13 @@ jobs:
           - { label: linux-x64,    os: ubuntu-24.04       }
           - { label: linux-arm64,  os: ubuntu-24.04-arm   }
           - { label: darwin-arm64, os: macos-14           }
-          - { label: darwin-x64,   os: macos-13           }
+          # ⚠️ `macos-15-intel`, NOT `macos-13`. The first attempt used the
+          # older label and the job sat QUEUED for the whole run without ever
+          # being scheduled — GitHub has retired that image, and a retired label
+          # does not fail, it waits. A leg that never runs is indistinguishable
+          # from a slow one on the summary page, which is the worst of the
+          # possible outcomes for a matrix whose purpose is to answer questions.
+          - { label: darwin-x64,   os: macos-15-intel     }
           - { label: win32-x64,    os: windows-2022       }
     defaults:
       run:
@@ -126,26 +132,36 @@ jobs:
             mingw-w64-ucrt-x86_64-pkgconf
             mingw-w64-ucrt-x86_64-zlib
 
-      # ⚠️ WINDOWS EXTRACTS UNDER MSYS2, AND THE REASON IS SYMLINKS.
+      # ⚠️ WINDOWS EXTRACTS UNDER MSYS2 WITH SYMLINK EMULATION FORCED ON, AND IT
+      # TOOK TWO ROUNDS TO GET THAT RIGHT.
       #
-      # QEMU's source tarball carries `roms/u-boot`, which is full of them.
-      # Git Bash's `tar` cannot create a symlink without the privilege or
-      # developer mode, and produces hundreds of
+      # QEMU's source tarball is full of symlinks — `roms/u-boot`, and also
+      # `tests/lcitool/libvirt-ci`. Git Bash's `tar` fails on all of them, and
+      # the first fix moved the extraction into MSYS2 on the belief that "MSYS2's
+      # tar copies instead". It does not: `msys2/setup-msys2` sets
+      # `MSYS=winsymlinks:nativestrict`, under which MSYS2 asks Windows for a
+      # REAL symlink — and Windows must know whether the target is a file or a
+      # directory, so a link created before its target fails with
       #
-      #     tar: qemu-9.2.4/roms/u-boot/include/ctype.h:
-      #          Cannot create symlink to 'linux/ctype.h'
+      #     tar: …/alpine-320-prep.sh: Cannot create symlink to
+      #          'alpine-prep.sh': No such file or directory
       #
-      # before failing. MSYS2's `tar` copies instead, which is what its symlink
-      # emulation does by default.
+      # ⚠️ `No such file or directory` AND NOT `Permission denied`, WHICH IS THE
+      # WHOLE DIAGNOSIS. The runner is privileged enough to create symlinks; the
+      # problem is ordering, not rights, and a fix aimed at privileges would not
+      # have worked.
       #
-      # `roms/` is excluded regardless: it holds firmware SOURCE for machines
+      # `winsymlinks:sysfile` writes a plain file carrying a marker instead.
+      # Nothing in this build follows those links, so the emulation is enough.
+      #
+      # `roms/` stays excluded regardless: it holds firmware SOURCE for machines
       # this build does not produce, and `x86_64-softmmu` takes its firmware
-      # from the prebuilt blobs in `pc-bios/`. Excluding it removes the problem
-      # rather than working around it, and it removes about a third of the
-      # extraction.
+      # from the prebuilt blobs in `pc-bios/`.
       - name: Fetch QEMU ${{ env.QEMU_VERSION }} (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
+        env:
+          MSYS: winsymlinks:sysfile
         run: |
           set -euo pipefail
           cd "$(cygpath "$GITHUB_WORKSPACE")"
