@@ -166,14 +166,45 @@ jobs:
       # packaged form and falling back to pip: pacman's copy is what an MSYS2
       # user would have, and pip is what makes the step work if that package is
       # ever renamed.
-      - name: distlib (Windows / MSYS2)
+      # ⚠️ TWO PYTHON PACKAGES, AND THE SECOND IS THE SUBTLEST FINDING ON THIS
+      # LEG.
+      #
+      # `distlib` is the same gap macOS had. `pycotap` is different: QEMU
+      # VENDORS its Python build dependencies as wheels under `python/wheels`
+      # and `mkvenv` installs from there OFFLINE, never reaching PyPI. On this
+      # host that directory is handed to pip as
+      #
+      #     file://D:/a/qemu-x86/qemu-x86/qemu-9.2.4/python/wheels
+      #
+      # and pip answers `is ignored: it is neither a file nor a directory` —
+      # a `file://` URL needs THREE slashes before a drive letter, and with two
+      # the `D:` is parsed as a HOST. So the vendored wheels are unreachable,
+      # and because mkvenv is offline there is no fallback:
+      #
+      #     ERROR: No matching distribution found for pycotap==1.3.1
+      #     mkvenv was configured to operate offline and did not check PyPI.
+      #
+      # ⭐ THE FIX IS NOT TO REPAIR THE URL. A non-isolated virtual environment
+      # sees the system's packages, and `mkvenv`'s own check is "is it
+      # importable" — which is why `meson` passes on this host and `pycotap`
+      # does not. Installing it beforehand satisfies the check the same way
+      # meson already does, and does not depend on how QEMU spells a path.
+      #
+      # This is the boundary MSYS2 makes easy to trip over: the shell speaks
+      # `/d/a/...` and the Python it ships is a NATIVE Windows build that
+      # speaks `D:/a/...`. This repository met the same boundary from the other
+      # side in openarch's CI, where `$PWD` in a manifest would have been the
+      # POSIX form and mcpp wanted the native one.
+      - name: The Python packages QEMU's mkvenv needs (Windows / MSYS2)
         if: runner.os == 'Windows'
         shell: msys2 {0}
         run: |
           pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-python-distlib \
             || python3 -m pip install --break-system-packages distlib \
             || python3 -m pip install distlib
-          python3 -c "import distlib; print('distlib', distlib.__version__)"
+          python3 -m pip install --break-system-packages pycotap \
+            || python3 -m pip install pycotap
+          python3 -c "import distlib, pycotap; print('distlib', distlib.__version__, '/ pycotap ok')"
 
       - name: Fetch QEMU ${{ env.QEMU_VERSION }} (Windows)
         if: runner.os == 'Windows'
