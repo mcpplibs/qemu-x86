@@ -84,16 +84,21 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           brew install ninja meson pkg-config glib pixman
-          # ⚠️ `distlib`, AND IT IS NOT AN OPTIONAL EXTRA. QEMU's `configure`
-          # builds a non-isolated virtual environment with its own `mkvenv`
-          # script, which needs `distlib` to populate it. Homebrew's Python 3.14
-          # does not carry it, and the failure is a configure-time
+          # ⚠️ `distlib`, AND IT IS A PROPERTY OF QEMU 9.2.4 RATHER THAN OF THIS
+          # RUNNER — MEASURED ON TWO HOSTS BEFORE IT WAS CALLED THAT.
+          #
+          # QEMU's `configure` builds a non-isolated virtual environment with its
+          # own `mkvenv` script, which needs `distlib` to populate it. Neither
+          # Homebrew's Python 3.14 nor MSYS2's carries it, and the failure is a
+          # configure-time
           #
           #     *** Ouch! ***
           #     found no usable distlib, please install it
           #
           # twenty seconds in, which reads like a QEMU problem and is a Python
-          # packaging one.
+          # packaging one. The first round fixed it on macOS alone, on the
+          # reading that Homebrew was unusual; the Windows leg then reached the
+          # same line and showed it was not.
           #
           # `--break-system-packages` because Homebrew's Python is
           # externally-managed (PEP 668) and refuses otherwise. On a throwaway
@@ -157,6 +162,19 @@ jobs:
       # `roms/` stays excluded regardless: it holds firmware SOURCE for machines
       # this build does not produce, and `x86_64-softmmu` takes its firmware
       # from the prebuilt blobs in `pc-bios/`.
+      # The same `distlib` gap as macOS, on MSYS2's Python. Preferring the
+      # packaged form and falling back to pip: pacman's copy is what an MSYS2
+      # user would have, and pip is what makes the step work if that package is
+      # ever renamed.
+      - name: distlib (Windows / MSYS2)
+        if: runner.os == 'Windows'
+        shell: msys2 {0}
+        run: |
+          pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-python-distlib \
+            || python3 -m pip install --break-system-packages distlib \
+            || python3 -m pip install distlib
+          python3 -c "import distlib; print('distlib', distlib.__version__)"
+
       - name: Fetch QEMU ${{ env.QEMU_VERSION }} (Windows)
         if: runner.os == 'Windows'
         shell: msys2 {0}
