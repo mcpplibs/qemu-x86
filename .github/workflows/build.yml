@@ -289,9 +289,69 @@ jobs:
           # loads at run time is a question for the descriptor, and answering it
           # by deleting files until something breaks is how a payload ends up
           # missing one on somebody else's machine.
-          mkdir -p ../out/bin ../out/share/qemu
+          mkdir -p ../out/bin ../out/share/qemu ../out/lib
           cp qemu-system-x86_64 ../out/bin/
           cp -r "$SRC/pc-bios/." ../out/share/qemu/
+
+          # ⚠️ THE PAYLOAD MUST CARRY WHAT IT LINKS AGAINST, AND MEASURING THAT
+          # IS WHAT CAUGHT THIS.
+          #
+          # An earlier build shipped only the emulator. Its measured closure:
+          #
+          #   linux   libpixman-1.so.0, libglib-2.0.so.0, libgio, libgobject,
+          #           libgmodule, libz.so.1, libzstd.so.1  -- none of them in
+          #           the payload, none of them core glibc
+          #   darwin  /opt/homebrew/opt/{pixman,glib,zstd,gnutls,...}/lib/*.dylib
+          #           -- ABSOLUTE paths into the build machine's Homebrew
+          #
+          # So that payload installs and then fails on first run for anyone
+          # without those libraries, and on macOS for anyone whose Homebrew is
+          # not at the same prefix -- an Intel mac uses /usr/local. The index's
+          # sibling packages avoid this by bundling: xPack's QEMU carries 51
+          # shared objects and reaches them through its own relative rpath.
+          #
+          # ⚠️ SYSTEM LIBRARIES ARE DELIBERATELY NOT BUNDLED. Core libc, libm
+          # and the macOS frameworks come from the running system by design;
+          # carrying a second libc into a process is the two-glibcs shape this
+          # index's own contract text names as a SIGSEGV source.
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            ldd qemu-system-x86_64 \
+              | awk '/=> \// {print $3}' \
+              | grep -vE '/(libc|libm|libdl|librt|libpthread|libresolv|ld-linux[^ ]*)\.so' \
+              | while read -r so; do cp -Ln "$so" ../out/lib/ 2>/dev/null || true; done
+            # ⚠️ `patchelf` on the EMULATOR, not on a loader. This project's own
+            # notes forbid patching a loader's own paths; setting a relative
+            # rpath on an ordinary executable is the opposite case, and it is
+            # what makes `out/lib` reachable without an environment variable.
+            sudo apt-get install -y -qq patchelf
+            patchelf --set-rpath '$ORIGIN/../lib' ../out/bin/qemu-system-x86_64
+            for so in ../out/lib/*.so*; do patchelf --set-rpath '$ORIGIN' "$so" 2>/dev/null || true; done
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            # Mach-O records each dependency by the install name the LIBRARY
+            # carries, so copying is not enough: every reference has to be
+            # rewritten, and so does each bundled library's own id.
+            otool -L qemu-system-x86_64 | tail -n +2 | awk '{print $1}' \
+              | grep -E '^/(opt|usr/local)/' \
+              | while read -r dy; do
+                  cp -Ln "$dy" ../out/lib/ 2>/dev/null || true
+                  install_name_tool -change "$dy" "@loader_path/../lib/$(basename "$dy")" \
+                    ../out/bin/qemu-system-x86_64 2>/dev/null || true
+                done
+            for dy in ../out/lib/*.dylib; do
+              [ -e "$dy" ] || continue
+              install_name_tool -id "@loader_path/$(basename "$dy")" "$dy" 2>/dev/null || true
+              otool -L "$dy" | tail -n +2 | awk '{print $1}' | grep -E '^/(opt|usr/local)/' \
+                | while read -r dep; do
+                    cp -Ln "$dep" ../out/lib/ 2>/dev/null || true
+                    install_name_tool -change "$dep" "@loader_path/$(basename "$dep")" "$dy" 2>/dev/null || true
+                  done
+            done
+            # ⚠️ Rewriting invalidates the ad-hoc signature; re-sign, or the
+            # binary is killed by the kernel rather than merely warned about.
+            codesign --force -s - ../out/bin/qemu-system-x86_64 2>/dev/null || true
+            for dy in ../out/lib/*.dylib; do codesign --force -s - "$dy" 2>/dev/null || true; done
+          fi
+          rmdir ../out/lib 2>/dev/null || true
 
       - name: Configure and build (Windows / MSYS2)
         if: runner.os == 'Windows'
@@ -523,6 +583,38 @@ jobs:
           # at run time is a question for the descriptor, and answering it by
           # deleting directories until something breaks is how a payload ends up
           # missing a firmware blob on somebody else's machine.
+          # ⭐ THE PAYLOAD MUST NOT REACH OUTSIDE ITSELF, ASSERTED RATHER THAN
+          # ASSUMED. This is the check that would have failed on the first
+          # build, and it fails loudly instead of at somebody's first run.
+          echo "── every library the emulator names ──"
+          case "$RUNNER_OS" in
+            Linux)
+              readelf -d out/bin/qemu-system-x86_64 | grep -E 'NEEDED|RUNPATH|RPATH' || true
+              # Resolve the closure the way the loader will, from the payload.
+              bad=$(ldd out/bin/qemu-system-x86_64 2>/dev/null \
+                    | awk '/=> \// {print $3}' \
+                    | grep -vE "^$PWD/out/" \
+                    | grep -vE '/(libc|libm|libdl|librt|libpthread|libresolv|ld-linux[^ ]*)\.so' || true)
+              if [ -n "$bad" ]; then
+                echo "$bad"
+                echo "::error::the payload links against libraries it does not carry; installing it would succeed and running it would not"
+                exit 1
+              fi
+              echo "resolved entirely inside the payload, plus core glibc" ;;
+            macOS)
+              otool -L out/bin/qemu-system-x86_64 | tail -n +2 | awk '{print $1}'
+              bad=$(otool -L out/bin/qemu-system-x86_64 | tail -n +2 | awk '{print $1}' \
+                    | grep -E '^/(opt|usr/local)/' || true)
+              if [ -n "$bad" ]; then
+                echo "$bad"
+                echo "::error::the payload names absolute paths into this build machine's package manager; it would fail on any host without the same prefix"
+                exit 1
+              fi
+              echo "no build-machine paths remain" ;;
+            Windows)
+              echo "(the DLL closure sits beside the exe; counted above)" ;;
+          esac
+
           echo "── the ten largest things under the prefix ──"
           du -sh out/* 2>/dev/null | sort -rh | head -10
           du -sh out/share/* 2>/dev/null | sort -rh | head -10
