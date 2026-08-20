@@ -279,8 +279,26 @@ jobs:
             --disable-libssh --disable-spice --disable-smartcard \
             --disable-usb-redir --disable-opengl --disable-virglrenderer \
             --disable-curl
-          ninja -j"$(nproc)"
-          ninja install
+          # ⚠️ THE EMULATOR TARGET, NOT `ninja` — AND ON THIS HOST THAT IS THE
+          # DIFFERENCE BETWEEN A BUILD AND A FAILURE.
+          #
+          # A bare `ninja` builds QEMU's unit tests too, and one of them does not
+          # link under MinGW:
+          #
+          #     FAILED: tests/unit/test-vmstate.exe
+          #     test-vmstate.c:48: undefined reference to `qemu_ftruncate64'
+          #
+          # 1897 of 2032 targets had already built. That symbol is a QEMU
+          # portability shim its own test happens to reference and the Windows
+          # build does not provide; it says nothing about the emulator, which is
+          # what this workflow is producing.
+          #
+          # ⭐ Naming the target rather than patching the test is the smaller
+          # claim: a package build has no reason to build a test suite, and
+          # doing so made the whole leg depend on whether upstream's tests
+          # happen to be portable this release.
+          ninja -j"$(nproc)" qemu-system-x86_64
+          meson install --no-rebuild
 
       # ── The check that the artifact is an emulator, not a file ────────────
       #
@@ -373,13 +391,33 @@ jobs:
         run: |
           set -euo pipefail
           QEMU=$(find out -name 'qemu-system-x86_64*' -type f | head -1)
-          ls -l "$QEMU"
+          echo "before stripping:"; ls -l "$QEMU"; du -sh out
+
+          # ⚠️ STRIPPED, BECAUSE THE UNSTRIPPED FIGURE IS NOT A PAYLOAD SIZE AND
+          # THE INDEX HAS PAID FOR THAT CONFUSION ONCE ALREADY.
+          #
+          # Measured on the first green legs: 392M (linux-x64), 389M
+          # (linux-arm64), 341M/342M (darwin). Those are debug symbols, not an
+          # emulator. A previous payload in this ecosystem was 34.81 MB and
+          # became 4.62 MB once stripped, and the upload failures that had been
+          # blamed on the mirror were the size.
+          #
+          # ⚠️ NOT ON macOS. Stripping a Mach-O invalidates its ad-hoc
+          # signature, which is the rule this ecosystem's own release pipeline
+          # follows; the darwin legs report the unstripped figure and say so.
           case "$RUNNER_OS" in
-            Linux)   readelf -d "$QEMU" | grep NEEDED || true ;;
-            macOS)   otool -L "$QEMU" || true ;;
-            Windows) echo "(the DLL closure is measured in the packaging step, not here)" ;;
+            Linux)
+              find out -type f \( -name 'qemu-system-*' -o -name '*.so*' \) -exec strip --strip-unneeded {} + 2>/dev/null || true
+              echo "after stripping:"; ls -l "$QEMU"; du -sh out
+              readelf -d "$QEMU" | grep NEEDED || true ;;
+            macOS)
+              echo "(not stripped: it would invalidate the ad-hoc signature)"
+              otool -L "$QEMU" || true ;;
+            Windows)
+              find out -type f -name '*.exe' -exec strip --strip-unneeded {} + 2>/dev/null || true
+              echo "after stripping:"; ls -l "$QEMU"; du -sh out
+              echo "(the DLL closure is measured in the packaging step, not here)" ;;
           esac
-          du -sh out
 
       - uses: actions/upload-artifact@v4
         with:
