@@ -297,7 +297,13 @@ jobs:
           # claim: a package build has no reason to build a test suite, and
           # doing so made the whole leg depend on whether upstream's tests
           # happen to be portable this release.
-          ninja -j"$(nproc)" qemu-system-x86_64
+          # ⚠️ `.exe`, AND OMITTING IT IS NOT A WARNING BUT A HARD STOP:
+          #
+          #     ninja: error: unknown target 'qemu-system-x86_64'
+          #
+          # The Unix legs name the target without a suffix and this one with,
+          # because meson names the target after the file it produces.
+          ninja -j"$(nproc)" qemu-system-x86_64.exe
           meson install --no-rebuild
 
       # ── The check that the artifact is an emulator, not a file ────────────
@@ -418,6 +424,23 @@ jobs:
               echo "after stripping:"; ls -l "$QEMU"; du -sh out
               echo "(the DLL closure is measured in the packaging step, not here)" ;;
           esac
+
+          # ⭐ WHAT IS ACTUALLY BIG, BECAUSE STRIPPING ANSWERED LESS THAN
+          # EXPECTED. Measured on linux-x64: the emulator went 78.7 MB → 27.0
+          # MB, and the whole prefix went 392 MB → 343 MB. So roughly 316 MB is
+          # not the emulator at all, and a payload that tarred this prefix would
+          # ship it. The index's asset budget is a per-connection upload rate
+          # measured at 0.012 MB/s into the CN mirror, with no multipart and no
+          # resume — so what a payload SELECTS matters more here than what it
+          # strips.
+          #
+          # Listed rather than pruned: which of these an emulator actually needs
+          # at run time is a question for the descriptor, and answering it by
+          # deleting directories until something breaks is how a payload ends up
+          # missing a firmware blob on somebody else's machine.
+          echo "── the ten largest things under the prefix ──"
+          du -sh out/* 2>/dev/null | sort -rh | head -10
+          du -sh out/share/* 2>/dev/null | sort -rh | head -10
 
       - uses: actions/upload-artifact@v4
         with:
