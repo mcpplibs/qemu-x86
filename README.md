@@ -2,9 +2,17 @@
 
 Cross-host builds of `qemu-system-x86_64` for the mcpp/xlings package index.
 
-**Status: a question being asked, not a package.** Nothing here is published,
-and nothing here should be added to the index until the workflow is green on
-all five hosts.
+**Status: published.** `9.2.4-1` is released here, mirrored to
+`xlings-res/qemu-x86` on GitCode, and admitted to the index as `xim:qemu-x86`
+(openxlings/xim-pkgindex#665).
+
+```
+xlings install qemu-x86 -y
+```
+
+⭐ The reason it exists is `mcpplibs/openarch`: its `examples/switch` now boots
+on `x86_64-none-elf` through `mcpp run` and prints `switch ok`, which is the one
+claim a working `--version` does not make.
 
 ## Why this repository exists
 
@@ -41,9 +49,8 @@ Linux leg does.
 
 | | |
 |---|---|
-| An index descriptor | Admission is a separate decision, made after five green legs |
 | Committed binaries | The workflow builds what it checks, so nothing here is a blob whose provenance has to be trusted |
-| A mirror upload | Mirroring an artifact that has not been shown to run would publish the untested thing faster |
+| Firmware pruning | Which `pc-bios` blob a machine type loads is a runtime question. Answering it by deleting until something breaks is how a payload ends up missing one blob on somebody else's machine — this was attempted once during development and reverted |
 
 ## What "it works" means here
 
@@ -70,3 +77,40 @@ resulting size.
 
 The version is pinned to the series `qemu-arm` and `qemu-riscv` already carry, so
 that a user who installs all three gets one QEMU generation rather than two.
+
+## The payload is self-contained, and that was measured rather than assumed
+
+The first build produced binaries that ran on the machine that built them and
+nowhere else: the Linux legs left `libpixman-1`, the glib family, `libz` and
+`libzstd` to the host, and the darwin legs hardcoded `/opt/homebrew/opt/...`.
+
+Every non-system shared library is now bundled beside the emulator and reached
+through `$ORIGIN/../lib` (linux), `@loader_path/../lib` (darwin) or the
+executable's own directory (win32, where PE has no runtime search path). The
+workflow asserts it: what remains outside the payload must be core libc and
+system frameworks, nothing else.
+
+Measured on the released linux-x64 asset — fifteen objects resolve, twelve from
+the payload's own `lib/`, and the two that cross the boundary are `libc.so.6`
+and `libm.so.6`. That measurement is what lets `xim:qemu-x86` declare no `deps`.
+
+⚠️ **The first attempt at that measurement measured nothing.** It was written as
+`ldd <bin> 2>/dev/null | grep -v <payload>`, which printed nothing and read
+exactly like "nothing escapes" — the `ldd` on the PATH was a shell script that
+failed to parse, and it failed on stderr. The numbers above come from
+`LD_TRACE_LOADED_OBJECTS=1` invoked on the loader directly.
+
+⚠️ **Bundling also broke the macOS leg silently.** Its pipelines end in `grep`,
+an empty-matching `grep` returns 1, `pipefail` promotes it and `errexit` turns
+it into an exit — so the leg exited 1 after reporting `1564/1564`. `set +e`
+around the bundling blocks fixes it.
+
+## Archive layout
+
+The archives are flat: `bin/` and `share/` at the top level, no wrap directory.
+
+⚠️ That is a choice the consumer has to know about. xim extracts in place, into
+a directory it also uses for other things, so a descriptor cannot move the
+extraction directory wholesale the way `qemu-arm`'s can — `xim:qemu-x86` moves
+the two entries by name, and asserts the emulator *before* the move rather than
+after, because the source directory is shared.
